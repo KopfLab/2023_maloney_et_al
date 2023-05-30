@@ -1,0 +1,796 @@
+---
+title: "Figure suggestions for Ashley's paper"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+format: 
+  html:
+    highlight-style: dracula
+    number-sections: true
+    code-line-numbers: true
+    code-tools: true
+    code-fold: true
+    code-summary: "Show the code"
+    code-link: true
+    toc: true
+    toc-float: true
+    toc-depth: 2
+    fig-width: 8
+    fig-height: 6
+    df-print: tibble
+embed-resources: true
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r}
+#| label: setup
+#| message: false
+
+# load packages
+library(rlang)
+library(tidyverse)
+library(readxl)
+library(cowplot)
+
+# load scripts
+source("scripts/plotting_functions.R")
+source("scripts/error_propagation.R")
+source("scripts/table_functions.R")
+
+# constants
+blue <- "#6FBAD1"
+brown <- "#DB965C"
+
+# global knitting options for code rendering
+knitr::opts_chunk$set(
+  dev = c("png", "pdf"), fig.keep = "all",
+  dev.args = list(pdf = list(encoding = "WinAnsi", useDingbats = FALSE)),
+  fig.path = sprintf("plots/%s_", gsub("\\.qmd", "", knitr::current_input()))
+)
+```
+
+# Load Data {#sec-plots}
+
+```{r}
+#| warning: false
+#| message: false
+#| eval: false
+data_path <- "data/raw_data.xlsx"
+
+# load growth rates
+growth_rates <- read_excel(data_path, sheet = "growth_rates", skip = 2L) |>
+  mutate(growth = factor(growth))
+
+# load all lipid isotope data
+lipid_isotopes_all <- 
+  read_excel(data_path, sheet = "lipid_isotopes", skip = 2L) |>
+  # pull out data
+  pivot_longer(
+    cols = matches("d2H_(16|18)"),
+    names_to = c("fatty_acid", ".value"),
+    names_pattern = "d2H_(.+)_([^_]+)$"
+  ) |>
+  # extract dataset and growth info and calculate epsilon
+  mutate(
+    dataset = str_extract(`Identifier 2`, "[Gg]lycerol|[Gg]lucose") |> str_to_lower(),
+    growth = str_extract(`Identifier 2`, "slow|med|fast") |> factor() |>
+      fct_recode("medium" = "med"),
+    sample = str_extract(`Identifier 2`, "#\\d+"),
+    fatty_acid = sprintf("C%s FAME", fatty_acid),
+    eps_fa_water.permil = ((value + 1000) / (d2H_water + 1000) - 1) * 1000,
+    # propagate error from water and lipid isotope measurements
+    eps_fa_water_sd.permil = 
+      propagate_error(
+        eq = ((value + 1000) / (d2H_water + 1000) - 1) * 1000,
+        dvalue = sd,
+        dd2H_water = d2H_water_sd,
+        quiet = FALSE
+      )
+  ) |>
+  select(dataset, growth, sample, fatty_acid, eps_fa_water.permil, eps_fa_water_sd.permil)
+  
+# load all lipid amounts
+lipid_amounts_all <- 
+  read_excel(
+    "data/raw_data.xlsx", 
+    sheet = "lipid_abundances", skip = 2L) |>
+    # get out dataset
+    mutate(
+      sample = str_extract(Comment, "#\\d+"),
+      dataset = str_extract(Comment, "[Gg]lycerol|[Gg]lucose") |> str_to_lower(),
+      growth = factor(growth) |> fct_recode("medium" = "med"),
+    ) |>
+    # calculate abundance (ug/mg dry biomass)
+    pivot_longer(
+      cols = matches("C16|C18"), 
+      names_to = "fatty_acid", values_to = "area") |>
+    mutate(
+      # 100 µg of C21:0 recovery standard
+      ab.ug_mg = area / `C21 FAME rec. std` * 100 / `mg dry biomass`,
+      # 50 µg of 5a-cholestane for recovery
+      recovery = (`C21 FAME rec. std`/100) / (`5a-cholestane`/50)
+    ) |>
+  select(dataset, growth, sample, fatty_acid, ab.ug_mg, recovery)
+
+# combine lipid isotope and abundance data
+lipids_all <-
+  lipid_amounts_all |>
+  full_join(lipid_isotopes_all, by = c("dataset", "growth", "sample", "fatty_acid"))
+
+# include rows for the summary data
+lipids_all <-
+  bind_rows(
+    lipids_all, 
+    lipids_all |>
+      mutate(has_data = !is.na(eps_fa_water.permil) & !is.na(ab.ug_mg)) |>
+      group_by(dataset, growth, sample) |>
+      summarise(
+        # calc. weighted fractionation factor based on lipids with all data
+        eps_fa_water.permil = sum(
+          ab.ug_mg[has_data] * eps_fa_water.permil[has_data]) / sum(ab.ug_mg[has_data]),
+        # propagate analytical error (assuming negligable error in abundance quant)
+        eps_fa_water_sd.permil = sqrt(sum(
+          (ab.ug_mg[has_data] * eps_fa_water_sd.permil[has_data])^2)) /
+          sum(ab.ug_mg[has_data]),
+        # sum all quantified lipids
+        ab.ug_mg = sum(ab.ug_mg, na.rm = TRUE),
+        .groups = "drop"
+      ) |>
+      mutate(fatty_acid = "all")
+  )
+
+# load all enzyme activity data
+enzymes_all <- 
+  read_excel(data_path, sheet = "enzymes", skip = 2L) |>
+  # remove empty rows
+  filter(!is.na(growth)) |>
+  # get out dataset and enzyme
+  mutate(
+    dataset = str_extract(`plate name`, "[Gg]lycerol|[Gg]lucose") |> str_to_lower(),
+    enzyme = str_extract(enzyme, "\\w+"),
+    growth = str_to_lower(growth) |> factor(),
+    # maxV units: abs@340nm * 1000 / (min * well)
+    # BCA [protein] mean units: µg / mL = mg protein / L
+    # pathlength 0.25 cm/well
+    # NADPH molar absorption: 6.22 abs@340nm / (mmol / L NADPH * cm)
+    # rate = Vmax * dilutionfactor / pathlength * 1/protein_conc * 1/NADPH_mol_abs
+    # units: abs@340 * 1000 / (min * well) * well/cm * L/mg protein * mmol /L NADPH * cm / abs@340 = 1000 / min * mmol NADPH / mg protein = mol NADPH / (mg protein * min)
+    # --> numbers are small so * 1000 to get to mmol NADPH / (mg protein * min)
+    rate = (maxV_mean - controlV_mean) * 
+      dilutionfactor/0.25 * 1 / `BCA [protein] mean` * 1/6.22 * 1000
+  ) |>
+  # correct g6p for 6pg since the former assay measures both
+  group_by(`sample date/time`) |>
+  mutate(rate = ifelse(enzyme == "g6p", rate - rate[enzyme == "6pg"], rate)) |>
+  ungroup() |>
+  # focus on columns of interest
+  select(dataset, growth, enzyme, rate)
+
+# load all bulk sample data
+bulk_all <- 
+  read_excel(
+    "data/raw_data.xlsx", 
+    sheet = "bulk", skip = 2L) |>
+  # get out dataset
+  mutate(
+    sample = str_extract(name, "#\\d+"),
+    growth = str_extract(name, "slow|med|fast") |> factor() |>
+      fct_recode("medium" = "med"),
+  ) |>
+  select(dataset = Substrate, growth, sample, CN, d15N, d13C)
+
+# export
+export_to_excel(
+  growth_rates = growth_rates,
+  lipids_all = lipids_all,
+  enzymes_all = enzymes_all,
+  bulk_all = bulk_all,
+  file = "output/table_S1_all_data.xlsx"
+)
+```
+
+```{r}
+# load data back in from table_S1 excel sheet
+table_s1_path <- "output/table_S1_all_data.xlsx"
+growth_rates <- readxl::read_excel(table_s1_path, sheet = "growth_rates")
+lipids_all <- readxl::read_excel(table_s1_path, sheet = "lipids_all")
+enzymes_all <- readxl::read_excel(table_s1_path, sheet = "enzymes_all")
+bulk_all <- readxl::read_excel(table_s1_path, sheet = "bulk_all")
+```
+
+# Calculations
+
+## Replicate summaries
+
+```{r}
+# calculate lipid data averages
+lipids <- 
+  lipids_all |>
+  group_by(dataset, growth, fatty_acid) |>
+  summarise(
+    ab_mean.ug_mg = mean(ab.ug_mg), ab_sd.ug_mg = sd(ab.ug_mg),
+    eps_mean.permil = mean(eps_fa_water.permil), 
+    eps_sd_stat.permil = sd(eps_fa_water.permil), 
+    eps_sd_prop.permil = sqrt(sum(eps_fa_water_sd.permil^2))/n(),
+    # use whichever is larger (statistical or propagated error)
+    eps_sd.permil = ifelse(eps_sd_stat.permil > eps_sd_prop.permil, 
+                           eps_sd_stat.permil, eps_sd_prop.permil),
+    .groups = "drop"
+  )
+
+# calculate average enzyme activity data
+enzymes <- enzymes_all |>
+  group_by(dataset, growth, enzyme) |>
+  summarise(rate_mean = mean(rate), rate_sd = sd(rate), .groups = "drop")
+
+# calculate average bulk data
+bulk <- bulk_all |>
+  group_by(dataset, growth) |>
+  summarise(
+    CN_mean = mean(CN), CN_sd = sd(CN),
+    d15N_mean = mean(d15N), d15N_sd = sd(d15N),
+    d13C_mean = mean(d13C), d13N_sd = sd(d13C),
+    .groups = "drop"
+  )
+
+# wide formats (simplify values by removing _mean)
+lipids_wide <- lipids |>
+  pivot_wider(
+    names_from = fatty_acid, 
+    names_glue = "{fatty_acid}_{.value}",
+    values_from = c(-dataset, -growth, -fatty_acid)
+  ) |> rename_with(function(x) str_remove(x, fixed("_mean")))
+enzymes_wide <- enzymes |>
+  pivot_wider(
+    names_from = enzyme,
+    names_glue = "{enzyme}_{.value}",
+    values_from = c(-dataset, -growth, -enzyme)
+  ) |> rename_with(function(x) str_remove(x, fixed("_mean")))
+bulk_wide <- bulk |>
+  rename_with(function(x) str_remove(x, fixed("_mean")))
+```
+
+## Unsaturation calculation
+
+$$
+\begin{aligned}
+f_{unsaturated} &= \frac{\sum_i ab_{i:1}}{\sum ab} \\
+\epsilon_{x:1/x:0} &= \frac{\delta_{x:1} + 1}{\delta_{x:0} + 1} - 1
+\end{aligned}
+$$
+
+```{r}
+# calculate % unsaturation fatty acids
+calc_unsat <- rlang::expr( 
+  (`C16:1 FAME_ab.ug_mg` + `C18:1 FAME_ab.ug_mg`) / 
+    (`C16:1 FAME_ab.ug_mg` + `C18:1 FAME_ab.ug_mg` + `C16:0 FAME_ab.ug_mg` + `C18:0 FAME_ab.ug_mg`))
+
+# calculate fractionation between unsaturated and saturated C16
+calc_eps_16_1_0 <- rlang::expr(
+  ((`C16:1 FAME_eps.permil`/1000 + 1) / (`C16:0 FAME_eps.permil`/1000 + 1) - 1) * 1000
+)
+
+lipid_calculations <- 
+  lipids_wide |>
+  mutate(
+    `% unsat` = !!calc_unsat,
+    `% unsat sd` = propagate_error(
+      !!calc_unsat, 
+      `dC16:1 FAME_ab.ug_mg` = `C16:1 FAME_ab_sd.ug_mg`,
+      `dC18:1 FAME_ab.ug_mg` = `C18:1 FAME_ab_sd.ug_mg`,
+      `dC16:0 FAME_ab.ug_mg` = `C16:0 FAME_ab_sd.ug_mg`,
+      `dC18:0 FAME_ab.ug_mg` = `C18:0 FAME_ab_sd.ug_mg`
+    ),
+    `C16:1/C16:0_eps.permil` = !!calc_eps_16_1_0,
+    `C16:1/C16:0_eps_sd.permil` = propagate_error(
+      !!calc_eps_16_1_0, 
+      `dC16:1 FAME_eps.permil` = `C16:1 FAME_eps_sd.permil`,
+      `dC16:0 FAME_eps.permil` = `C16:0 FAME_eps_sd.permil`
+    )
+  )
+
+lipid_calculations |> knitr::kable()
+```
+
+## IDH contributions to NADPH pool
+
+-   assumes protein activity is comparable for purposes of relative contributions to NADPH
+
+-   the `% cyto IDH` calculation assumes glucose metabolism IDH is all mitochondrial and estimates the cytosolic contribution in glycerol metabolism by correcting for the estimated mitochondrial component
+
+$$
+\begin{aligned}
+R_{fa} &= \frac{1}{4} \cdot \alpha_{l/w} \cdot R_{w} + \frac{1}{4} \cdot \alpha_{l/s} \cdot R_{s} + \frac{1}{2} \cdot \alpha_{l/cof} \cdot R_{NADPH} \\
+R_{NADPH} &= f_{oxP} \cdot \alpha_{oxP/s} \cdot R_{s} + f_{aldh} \cdot \alpha_{aldh/w} \cdot R_{w} + f_{cidh} \left( \frac{2}{3} \cdot \alpha_{cidh/s} \cdot R_{s} + \frac{1}{3} \cdot \alpha_{cidh/w} \cdot R_{w} \right) \\
+\rightarrow \frac{R_{fa}}{R_w} &= 
+    \left(
+        \frac{\alpha_{l/w}}{4} + f_{aldh} \frac{\alpha_{aldh/w}}{2} + f_{cidh} \frac{\alpha_{cidh/w}}{6}
+   \right) + 
+   \left(
+        \frac{\alpha_{l/s}}{4} + f_{oxP} \frac{\alpha_{oxP/s}}{2} + f_{cidh} \frac{\alpha_{cidh/s}}{3}
+   \right) \cdot \frac{R_s}{R_w} \\
+&= 
+\end{aligned}
+$$
+
+```{r}
+# calculate percent total/cytosolic IDH as NADPH source
+calc_total <- rlang::expr(IDH_rate / (IDH_rate + ALDH_rate + g6p_rate + `6pg_rate`))
+calc_cyto <- rlang::expr(cIDH_rate / (cIDH_rate + ALDH_rate + g6p_rate + `6pg_rate`))
+
+enzyme_calculations <- 
+  growth_rates |>
+  left_join(enzymes_wide, by = c("dataset", "growth")) |>
+  mutate(
+    # assume glucose rates are the mitochondrial rates
+    mIDH_rate =
+      lm(
+        IDH_rate ~ growth, 
+        data = tibble(
+           IDH_rate = IDH_rate[dataset == "glucose"], 
+           growth = growth_rate.1_d[dataset == "glucose"])
+      ) |>
+      predict(newdata = data.frame(growth = growth_rate.1_d)),
+    cIDH_rate = ifelse(dataset == "glucose", 0, IDH_rate - mIDH_rate),
+    # assume rel. error the same as total IDH
+    cIDH_rate_sd = cIDH_rate * IDH_rate_sd/IDH_rate,
+    # contribution of total and cidh
+    `% total IDH` = !!calc_total,
+    `% total IDH sd` = propagate_error(
+      !!calc_total, dIDH_rate = IDH_rate_sd, dALDH_rate = ALDH_rate_sd,
+      dg6p_rate = g6p_rate_sd, d6pg_rate = `6pg_rate_sd`
+    ),
+    `% cyto IDH` = !!calc_cyto,
+    `% cyto IDH sd` = propagate_error(
+      !!calc_cyto, dcIDH_rate = cIDH_rate_sd, dALDH_rate = ALDH_rate_sd,
+      dg6p_rate = g6p_rate_sd, d6pg_rate = `6pg_rate_sd`
+    )
+  )
+
+enzyme_calculations |> knitr::kable()
+```
+
+## Wide frame of all data
+
+```{r}
+all_data <-
+  enzyme_calculations |>
+  left_join(lipid_calculations, by = c("dataset", "growth")) |>
+  left_join(bulk_wide, by = c("dataset", "growth")) 
+
+export_to_excel(
+  all_summary = all_data,
+  lipds_summary = lipids,
+  enzymes_summary = enzymes,
+  bulk_summary = bulk,
+  file = "output/table_S2_data_summary.xlsx"
+)
+
+all_data |> knitr::kable()
+```
+
+## Correlation coefficients
+
+```{r}
+#| warning: false
+corr_data <- 
+  all_data |> 
+  mutate(`1/all_ab.ug_mg` = 1/all_ab.ug_mg) |>
+  pivot_longer(
+    c(
+      all_eps.permil, growth_rate.1_d, `% cyto IDH`, `% total IDH`, `CN`, `% unsat`, `all_ab.ug_mg`, `1/all_ab.ug_mg`, `C16:1/C16:0_eps.permil`
+    )
+  ) |>
+  select(dataset, growth, name, value) |>
+  mutate(name = as_factor(name))
+
+corr_matrix <- corr_data |>
+  full_join(corr_data, by = c("dataset", "growth"), multiple = "all") |>
+  filter(name.x != name.y) |>
+  crossing(select_dataset = c("glycerol only", "glucose only", "all data")) |>
+  filter(select_dataset == "all data" | str_extract(select_dataset, "\\w+") == dataset) |>
+  group_by(select_dataset, name.x, name.y) |>
+  summarize(
+    n = n(),
+    pearson_r = cor(value.x, value.y, method = "pearson"),
+    pearson_pval = cor.test(value.x, value.y, method = "pearson")$p.value,
+    lm_r2 = summary(lm(value.y ~ value.x))$r.squared,
+    .groups = "drop"
+  ) 
+
+# output
+corr_table <- 
+  corr_matrix |>
+  select(dataset = select_dataset, y = name.y, x = name.x, n, pearson_r, pearson_pval, lm_r2)
+
+export_to_excel(
+  correlations = corr_table,
+  file = "output/table_S3_correlation_coefficients.xlsx"
+)
+
+corr_table |> knitr::kable()
+```
+
+## Glucose data NLS fit
+
+Cellular mass balance
+
+-   $L$ is the NADPH demand of fatty acid biosynthesis compared to other cellular materials
+
+-   $ab$ is the cellular abundance of all fatty acids (mg fatty acids / mg dry biomass)
+
+-   $R_x$ are the D/H ratios of the entire cell, the lipids, and all other cellular components (proteins, nucleotides, sugars), respectively
+
+-   $\alpha_{o/l}$ is the fractionation factor between other cellular materials and the lipid pool
+
+$$
+\begin{aligned}
+f &= L \cdot \frac{m_{lipids}}{m_{cell}} = L \cdot ab \\
+R_{cell} &= f \cdot R_{lipids} + (1 - f) \cdot R_{other} \\
+&= f \cdot R_{lipids} + (1 - f) \cdot \alpha_{o/l} \cdot R_{lipids} \\
+\rightarrow R_{lipids} &= \frac{R_{cell}}{f + (1-f) \cdot \alpha_{o/l}}
+    = \frac{R_{cell}}{f \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} \\
+\rightarrow \epsilon_{lipids/water} + 1 &= \frac{\epsilon_{cell/water} + 1}{f \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} \\
+\rightarrow \epsilon_{lipids/water} &= \frac{\epsilon_{cell/water} + 1}{ L \cdot ab \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} - 1
+\end{aligned}
+$$
+
+```{r}
+# formula expr - consider eps values in permil and ab_all in µg/mg
+eq <- rlang::expr(
+  (eps_cell + 1000) / 
+    (L * all_ab.ug_mg/1000 * (1 - alpha_ol) + alpha_ol) - 1000
+)
+
+# fit function
+fit_model_by_nls <- function(alpha_ol) {
+  nls(
+    formula = rlang::new_formula(rlang::expr(all_eps.permil), eq),
+  data = all_data |>
+    filter(dataset == "glucose") |>
+    mutate(alpha_ol = !!alpha_ol),
+    start = list(eps_cell = 0, L = 1)
+  )
+}
+
+# fit with different alpha_ol values
+fits <- 
+  tibble(
+    alpha_ol = seq(1.1, 1.55, by = 0.02)
+  ) %>% 
+  mutate(
+    nls_fit = map(alpha_ol, fit_model_by_nls),
+    nls_sum = map(nls_fit, broom::glance),
+    nls_sigma = map_dbl(nls_sum, ~.x$sigma),
+    nls_coefs = map(nls_fit, ~{
+      left_join(
+        broom::tidy(.x),
+        nlstools::confint2(.x, level = 0.95, method = "asymptotic") %>% 
+          as_tibble(rownames = "term"),
+        by = "term"
+      )
+    })
+  ) %>%
+  select(-nls_fit, -nls_sum) %>%
+  unnest(nls_coefs)
+```
+
+# Data Overview (just to check, not for MS)
+
+## Figure 2
+
+```{r}
+lipids |> 
+  left_join(growth_rates, by = c("dataset", "growth")) |>
+  ggplot() +
+  aes(growth_rate.1_d, eps_mean.permil, color = dataset, shape = fatty_acid) +
+  geom_point(
+    data = function(df) df |> filter(fatty_acid == "all"),
+    size = 4
+  ) +
+  geom_point(
+    data = function(df) df |> filter(fatty_acid != "all"),
+    size = 2, alpha = 0.5, show.legend = FALSE
+  ) +
+  theme_bw()
+```
+
+## Figure 3
+
+```{r}
+enzymes |> 
+  left_join(growth_rates, by = c("dataset", "growth")) |>
+  ggplot() +
+  aes(growth_rate.1_d, rate_mean, color = dataset) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  geom_point(size = 4) +
+  geom_point(
+    data = enzymes_all |>left_join(growth_rates, by = c("dataset", "growth")),
+    map = aes(y = rate),
+    size = 2, alpha = 0.5
+  ) +
+  theme_bw() +
+  facet_wrap(~enzyme)
+```
+
+# New figures
+
+## SI figure - correlation coefficient figure
+
+```{r}
+#| label: fig-SI-corr-coefs
+#| fig-width: 14
+#| fig-height: 5.5
+#| warning: false
+
+# p value significance levels
+pval_levels <- 
+  c(0.001, 0.01, 0.05, 0.1, 1) |> setNames(c("***", "**", "*", "~", "ns"))
+
+# generate plot
+corr_matrix |>
+  #filter(as.integer(name.y) > as.integer(name.x)) |>
+  mutate(
+    name.y = fct_rev(name.y),
+    signif = pearson_pval |> map_chr(~names(pval_levels)[which(.x < pval_levels)[1]])
+  ) |>
+  ggplot() +
+  aes(name.x, name.y) +
+  geom_tile(color = "black", fill = NA_character_) +
+  # geom_tile(
+  #   data = function(df) df |> 
+  #     filter(
+  #       (name.x == "all_eps.permil" | name.y == "all_eps.permil") & pearson_pval < 0.01 |
+  #       (
+  #         name.x == "all_eps.permil" & name.y == "1/all_ab.ug_mg" & select_dataset == "glucose only"
+  #       )
+  #     ),
+  #   color = NA_character_, fill = "yellow", alpha = 0.5
+  # ) +
+  geom_point(map = aes(size = log10(pearson_pval), color = pearson_r), alpha = 0.5) + 
+  geom_text(
+    map = aes(label = signif)
+  ) +
+  scale_color_gradientn(colours = c("#6D9EC1", "white", "#E46726")) +
+  scale_size_continuous(
+    breaks = log10(pval_levels), range = c(14, 1),
+    limits = c(-4.5, 0),
+    labels = function(x) {
+      map_chr(10^x, ~names(pval_levels)[which(.x <= pval_levels)[1]]) |>
+        paste0(" (< ", 10^x, ")")
+    }
+  ) +
+  facet_wrap(~select_dataset) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 16),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), 
+    panel.grid.major = element_blank(),
+    strip.background = element_rect(fill = "gray"),
+    strip.text = element_text(size = 20)
+  ) +
+  labs(
+    x = NULL, y = NULL, 
+    color = "pearson\ncorrelation (r)", 
+    size = "significance\n(p-value)"
+  )
+```
+
+## Summary figure - eps vs t/cIDH
+
+```{r}
+#| label: fig-eps-vs-cidh
+#| fig-width: 4
+#| fig-height: 4
+#| warning: false
+p_vs_cidh <- 
+  all_data |>
+  ggplot() +
+  aes(`% cyto IDH`, all_eps.permil) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
+  geom_point(map = aes(color = dataset), size = 4) +
+  # vertical error bars are smaller than sample points
+  geom_errorbarh(
+    map = aes(xmin = `% cyto IDH` - `% cyto IDH sd`,
+              xmax = `% cyto IDH` + `% cyto IDH sd`,
+              color = dataset),
+    height = 0
+  ) +
+  theme_figure(grid = FALSE, legend = FALSE) +
+  scale_x_reverse(labels = scales::percent) +
+  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
+  labs(
+    x = "estimated NADPH from cytosolic IDH", 
+    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
+  )
+p_vs_cidh 
+```
+
+```{r}
+#| label: fig-eps-vs-tidh
+#| fig-width: 4
+#| fig-height: 4
+#| warning: false
+p_vs_tidh <- 
+  all_data |>
+  ggplot() +
+  aes(`% total IDH`, all_eps.permil) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
+  # vertical error bars are smaller than sample points
+  geom_errorbarh(
+    map = aes(xmin = `% total IDH` - `% total IDH sd`,
+              xmax = `% total IDH` + `% total IDH sd`,
+              color = dataset),
+    height = 0
+  ) +
+  geom_point(map = aes(color = dataset), size = 4) +
+  theme_figure(grid = FALSE, legend = FALSE) +
+  scale_x_reverse(labels = scales::percent) +
+  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
+  labs(
+    x = "NADPH from all IDH\n(mitochondrial & cytosolic)", 
+    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
+  )
+p_vs_tidh 
+```
+
+## Summary figure - glucose inset
+
+```{r}
+#| label: fig-glucose-fit
+#| fig-width: 4
+#| fig-height: 4.5
+#| warning: false
+p_glucose_fit <- 
+  fits |>
+  # could use any fit here, they all fit equally well (by sigma)
+  filter(alpha_ol == 1.3) |>
+  select(alpha_ol, term, estimate) |>
+  pivot_wider(names_from = term, values_from = estimate) |>
+  crossing(
+    all_data |>
+      filter(dataset == "glucose") |> 
+      select(dataset, all_eps.permil, all_eps_sd.permil, all_ab.ug_mg, all_ab_sd.ug_mg)
+  ) |>
+  mutate(
+    all_eps_model.permil = rlang::eval_tidy(eq)
+  ) |>
+  ggplot() + 
+  aes(all_ab.ug_mg/1000, all_eps.permil, color = dataset) +
+  geom_errorbar(
+    map = aes(ymin = all_eps.permil - all_eps_sd.permil,
+              ymax = all_eps.permil + all_eps_sd.permil),
+    width = 0
+  ) +
+  geom_errorbarh(
+    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
+              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
+    height = 0
+  ) +
+  geom_point() + 
+  geom_line(map = aes(y = all_eps_model.permil), linewidth = 1) + 
+  geom_point(size = 4) +
+  scale_color_manual(values = c("glucose" = brown)) +
+  scale_x_continuous(labels = scales::percent, breaks = c(0.06, 0.08, 0.1)) + 
+  theme_figure(grid = FALSE, legend = FALSE) +
+  labs(
+    x = "weight % lipid\n(mg lipid / mg dry biomass)",
+    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
+  )
+p_glucose_fit
+```
+
+## Summary figure - combined
+
+```{r}
+#| label: fig-summary-cidh
+#| fig-width: 9
+#| fig-height: 4.5
+#| warning: false
+plot_grid(
+  p_vs_cidh, 
+  p_glucose_fit, 
+  align = "h", nrow = 1
+)
+```
+
+```{r}
+#| label: fig-summary-tidh
+#| fig-width: 9
+#| fig-height: 4.5
+#| warning: false
+plot_grid(
+  p_vs_tidh, 
+  p_glucose_fit, 
+  align = "h", nrow = 1
+)
+```
+
+## SI figure - NLS fit parameter space
+
+```{r}
+#| label: fig-SI-glucose-parameter-space
+#| fig-width: 4.5
+#| fig-height: 8
+#| warning: false
+fits |>
+  mutate(panel = as_factor(term) |> fct_recode(
+    "$\\epsilon_{cell/water}$ (\U2030)" = "eps_cell",
+    "L (lipid / other NADPH req.)" = "L"
+  )) |>
+  ggplot() +
+  aes(alpha_ol, estimate) +
+  geom_line() +
+  facet_wrap(
+    ~panel, ncol = 1,
+    scales = "free_y", strip.position = "left", 
+    labeller = label_latex()) +
+  theme_figure() +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_blank()
+  ) +
+  coord_cartesian(expand = FALSE) +
+  labs(y = NULL, x = latex2exp::TeX("$\\alpha_{other/lipid}$"))
+```
+
+## SI figure - unsaturation fractionation
+
+not entirely sure what to include here and how to make sense of it
+
+```{r}
+#| label: fig-SI-unsaturated-fractionation
+#| fig-width: 10
+#| fig-height: 4
+#| warning: false
+all_data |>
+  mutate(
+    # multiply for easier plotting
+    `%unsat value` = `% unsat` * 100,
+    `%unsat sd` = `% unsat sd` * 100,
+    `growth_rate value` = growth_rate.1_d,
+    `eps_all value` = all_eps.permil,
+    `eps_all sd` = all_eps_sd.permil
+  ) |>
+  pivot_longer(
+    cols = c(
+      `growth_rate value`, `eps_all value`, `eps_all sd`, 
+      `%unsat value`, `%unsat sd`),
+    names_to = c("name", ".value"),
+    names_pattern = "([^ .]+) (value|sd)?"
+  ) |> 
+  mutate(
+    panel = name |> as_factor() |>
+      fct_recode(
+        "Growth rate ($d^{-1}$)" = "growth_rate",
+        #"abundance ratio\n(16:1/16:0)" = "r_16_1_0"
+        "Unsaturated FAs (%)" = "%unsat"
+      )
+    ) |>
+  ggplot() +
+  aes(value, `C16:1/C16:0_eps.permil`, color = dataset) +
+  geom_errorbar(
+    map = aes(ymin = `C16:1/C16:0_eps.permil` - `C16:1/C16:0_eps_sd.permil`,
+              ymax = `C16:1/C16:0_eps.permil` + `C16:1/C16:0_eps_sd.permil`),
+    width = 0
+  ) +
+  geom_errorbarh(
+    map = aes(xmin = value - sd, xmax = value + sd),
+    height = 0
+  ) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) + 
+  geom_point(size = 4) +
+  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
+  facet_wrap(
+    ~panel, nrow = 1,
+    scales = "free_x", strip.position = "bottom", 
+    labeller = label_latex()) +
+  theme_figure(grid = FALSE, legend = FALSE) +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_blank()
+  ) +
+  labs(x = NULL, y = latex2exp::TeX("$\\epsilon_{16{:}1/16{:}0}$ (\U2030)")) 
+```
