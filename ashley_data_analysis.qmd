@@ -38,6 +38,7 @@ library(cowplot)
 source("scripts/plotting_functions.R")
 source("scripts/error_propagation.R")
 source("scripts/table_functions.R")
+source("scripts/stats_functions.R")
 
 # constants
 blue <- "#6FBAD1"
@@ -335,7 +336,9 @@ enzyme_calculations <-
       predict(newdata = data.frame(growth = growth_rate.1_d)),
     cIDH_rate = ifelse(dataset == "glucose", 0, IDH_rate - mIDH_rate),
     # assume rel. error the same as total IDH
-    cIDH_rate_sd = cIDH_rate * IDH_rate_sd/IDH_rate,
+    cIDH_rate_sd = IDH_rate_sd, #ifelse(
+      #dataset == "glucose", IDH_rate_sd, #IDH_rate - mIDH_rate, 
+      #cIDH_rate * IDH_rate_sd/IDH_rate),
     # contribution of total and cidh
     `% total IDH` = !!calc_total,
     `% total IDH sd` = propagate_error(
@@ -371,46 +374,74 @@ export_to_excel(
 all_data |> knitr::kable()
 ```
 
-## Correlation coefficients
+## Stats - correlation coefficients & york regressions
 
 ```{r}
-#| warning: false
-corr_data <- 
-  all_data |> 
-  mutate(`1/all_ab.ug_mg` = 1/all_ab.ug_mg) |>
-  pivot_longer(
-    c(
-      all_eps.permil, growth_rate.1_d, `% cyto IDH`, `% total IDH`, `CN`, `% unsat`, `all_ab.ug_mg`, `1/all_ab.ug_mg`, `C16:1/C16:0_eps.permil`
-    )
-  ) |>
-  select(dataset, growth, name, value) |>
-  mutate(name = as_factor(name))
+# which variables to explore
+vars <- c(
+  "all_eps.permil", "C16:1/C16:0_eps.permil", "1/(all_eps.permil + 1)", 
+  "growth_rate.1_d", "% cyto IDH", "% total IDH", "CN", "% unsat", 
+  "all_ab.ug_mg", "1/all_ab.ug_mg"
+)
 
-corr_matrix <- corr_data |>
-  full_join(corr_data, by = c("dataset", "growth"), multiple = "all") |>
+# additional columns with want to include
+all_data_w_addons <- 
+  all_data |> 
+  mutate(
+    `1/all_ab.ug_mg` = 1/all_ab.ug_mg,
+    `1/all_ab.ug_mg sd` = `1/all_ab.ug_mg` * all_ab_sd.ug_mg/all_ab.ug_mg,
+    `1/(all_eps.permil + 1)` = 1/(all_eps.permil/1000 + 1),
+    `1/(all_eps.permil + 1) sd` = `1/(all_eps.permil + 1)` * all_eps_sd.permil/1000 * 1/(all_eps.permil/1000 + 1)
+  )
+
+# calculate stats
+stats_data <-
+  all_data_w_addons |> 
+  select(dataset, growth, matches("sd")) |>
+  pivot_longer(matches("sd"), values_to = "sd") |>
+  mutate(name = str_remove(name, "[ _]?sd")) |>
+  full_join(
+    all_data_w_addons |> select(-matches("sd")) |> pivot_longer(c(-dataset, -growth)),
+    by = c("dataset", "growth", "name")
+  ) |> 
+  filter(!is.na(value)) |>
+  filter(name %in% !!vars) |>
+  mutate(name = factor(name, levels = vars))
+
+stats <- stats_data |>
+  full_join(stats_data, by = c("dataset", "growth"), multiple = "all") |>
   filter(name.x != name.y) |>
   crossing(select_dataset = c("glycerol only", "glucose only", "all data")) |>
   filter(select_dataset == "all data" | str_extract(select_dataset, "\\w+") == dataset) |>
-  group_by(select_dataset, name.x, name.y) |>
-  summarize(
-    n = n(),
-    pearson_r = cor(value.x, value.y, method = "pearson"),
-    pearson_pval = cor.test(value.x, value.y, method = "pearson")$p.value,
-    lm_r2 = summary(lm(value.y ~ value.x))$r.squared,
-    .groups = "drop"
-  ) 
+  nest(data = -c(select_dataset, name.x, name.y)) |>
+  mutate(
+    n = map_int(data, nrow),
+    pearson_r = map_dbl(
+      data, ~cor(.x$value.x, .x$value.y, method = "pearson")),
+    pearson_pval = map_dbl(
+      data, ~cor.test(.x$value.x, .x$value.y, method = "pearson")$p.value),
+    york = map(
+      data, ~york_regression(
+        X = .x$value.x, Y = .x$value.y, 
+        sigma_X = .x$sd.x, sigma_Y = .x$sd.y
+        #r_XY = cor(.x$sd.x, .x$sd.y)
+      )
+    )
+  ) |> 
+  unnest(york)
 
 # output
-corr_table <- 
-  corr_matrix |>
-  select(dataset = select_dataset, y = name.y, x = name.x, n, pearson_r, pearson_pval, lm_r2)
+stats_table <- 
+  stats |>
+  select(-data) |>
+  select(dataset = select_dataset, y = name.y, x = name.x, everything()) 
 
 export_to_excel(
-  correlations = corr_table,
+  stats = stats_table,
   file = "output/table_S3_correlation_coefficients.xlsx"
 )
 
-corr_table |> knitr::kable()
+stats_table |> knitr::kable()
 ```
 
 ## Glucose data NLS fit
@@ -427,13 +458,14 @@ Cellular mass balance
 
 $$
 \begin{aligned}
-f &= L \cdot \frac{m_{lipids}}{m_{cell}} = L \cdot ab \\
+f &= L \cdot \frac{m_{lipids}}{m_{cell}} = L \cdot ab_{all} \\
 R_{cell} &= f \cdot R_{lipids} + (1 - f) \cdot R_{other} \\
 &= f \cdot R_{lipids} + (1 - f) \cdot \alpha_{o/l} \cdot R_{lipids} \\
 \rightarrow R_{lipids} &= \frac{R_{cell}}{f + (1-f) \cdot \alpha_{o/l}}
     = \frac{R_{cell}}{f \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} \\
-\rightarrow \epsilon_{lipids/water} + 1 &= \frac{\epsilon_{cell/water} + 1}{f \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} \\
-\rightarrow \epsilon_{lipids/water} &= \frac{\epsilon_{cell/water} + 1}{ L \cdot ab \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} - 1
+\rightarrow \epsilon_{lipids/water} + 1 &= 
+     \frac{\epsilon_{cell/water} + 1}{ L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} \\
+     \approx \epsilon_{lipids/water} &\propto \frac{1}{ab_{all}} 
 \end{aligned}
 $$
 
@@ -490,11 +522,17 @@ lipids |>
     data = function(df) df |> filter(fatty_acid == "all"),
     size = 4
   ) +
-  geom_point(
-    data = function(df) df |> filter(fatty_acid != "all"),
+  # geom_point(
+  #   data = function(df) df |> filter(fatty_acid != "all"),
+  #   size = 2, alpha = 0.5, show.legend = FALSE
+  # ) +
+  geom_jitter(
+    data = lipids_all |> left_join(growth_rates, by = c("dataset", "growth")),
+    map = aes(y = eps_fa_water.permil),
     size = 2, alpha = 0.5, show.legend = FALSE
-  ) +
-  theme_bw()
+  ) + 
+  theme_bw() +
+  facet_wrap(~dataset, scales = "free_y")
 ```
 
 ## Figure 3
@@ -517,13 +555,194 @@ enzymes |>
 
 # New figures
 
-## SI figure - correlation coefficient figure
+## SI figure - york regressions figure
+
+```{r}
+#| label: fig-SI-eps-all-york-regressions
+#| fig-width: 14
+#| fig-height: 6
+#| warning: false
+
+# p value significance levels - use?
+pval_levels <- 
+  c(0.001, 0.01, 0.05, 0.1, 1) |> setNames(c("***", "**", "*", "~", "ns"))
+
+# base plot
+stats_base_plot <-
+  ggplot() +
+  aes(x = value.x, y = value.y) +
+  # panel highlight
+  geom_rect(
+    data = function(df) df |> filter(pearson_pval < 0.2, york_pval < 0.2),
+    map = aes(x = NULL, y = NULL, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+    color = NA_character_, fill = "yellow", alpha = 0.5
+  ) +
+  # fit error envelope
+  geom_ribbon(
+    data = function(df) df |> generate_york_regression_line(),
+    map = aes(x = NULL, xmin = yrl_x - yrl_sigma_x, xmax = yrl_x + yrl_sigma_x, y = yrl_y),
+    fill = "gray70", alpha = 0.5
+  ) +
+  # fit line
+  geom_line(
+    data = function(df) df |> generate_york_regression_line(),
+    map = aes(x = yrl_x, y = yrl_y), linetype = 1
+  ) +
+  # data error bars
+  geom_errorbarh(
+    data = function(df) df |> unnest(data),
+    map = aes(color = dataset, xmin = value.x - sd.x, xmax = value.x + sd.x),
+    height = 0
+  ) +
+  geom_errorbar(
+    data = function(df) df |> unnest(data),
+    map = aes(color = dataset, ymin = value.y - sd.y, ymax = value.y + sd.y),
+    width = 0
+  ) +
+  # data points
+  geom_point(
+    data = function(df) df |> unnest(data),
+    map = aes(color = dataset), size = 3) +
+  # regression info text
+  geom_text(
+    data = function(df) df |> 
+      group_by(name.x) |>
+      mutate(xmin = min(xmin), xmax = max(xmax)),
+    map = aes(
+      label = sprintf("corr: %s\nyork: %s", 
+                      signif(pearson_pval, 2), round(york_pval, 2)), 
+      x = if_else(b > 0, xmin, xmax), 
+      y = ymax),
+    vjust = "inward", hjust = "inward"
+  ) +
+  # scales
+  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
+  facet_grid(select_dataset + name.y ~ name.x, scales = "free", switch = "x") +
+  theme_figure(grid = FALSE) +
+  theme(
+    strip.background = element_blank(),
+    strip.text.y = element_blank(),
+    strip.placement = "outside"
+  ) +
+  labs(x = NULL) +
+  coord_cartesian(expand = FALSE)
+
+# make plot for all_eps.permil
+stats_base_plot %+%
+  filter(
+    stats,
+    !is.na(chisq),
+    name.y == "all_eps.permil",
+    !name.x %in% c("all_eps.permil", "1/(all_eps.permil + 1)", "C16:1/C16:0_eps.permil")
+  ) +
+  labs(y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)"))
+```
+
+```{r}
+#| label: fig-SI-1-over-eps-york-regressions
+#| fig-width: 14
+#| fig-height: 6
+#| warning: false
+
+# make plot for 1/eps
+stats_base_plot %+%
+  filter(
+    stats,
+    !is.na(chisq),
+    name.y == "1/(all_eps.permil + 1)",
+    !name.x %in% c("all_eps.permil", "1/(all_eps.permil + 1)", "C16:1/C16:0_eps.permil")
+  ) +
+  labs(y = latex2exp::TeX("$\\frac{1}{\\epsilon_{fattyacid/water} + 1}$"))
+```
+
+```{r}
+#| label: fig-SI-eps-16-1-0-york-regressions
+#| fig-width: 14
+#| fig-height: 6
+#| warning: false
+
+# make plot for eps 16:1/16:0
+stats_base_plot %+%
+  filter(
+    stats,
+    !is.na(chisq),
+    name.y == "C16:1/C16:0_eps.permil",
+    !name.x %in% c("all_eps.permil", "1/(all_eps.permil + 1)", "C16:1/C16:0_eps.permil")
+  ) +
+  labs(y = latex2exp::TeX("$\\epsilon_{16{:}1/16{:}0}$ (\U2030)"))
+```
+
+## MAYBE SI figure - correlation coefficient figure
+
+```{r}
+#| label: fig-SI-york-reg-p-vals
+#| fig-width: 8
+#| fig-height: 6
+#| warning: false
+#| eval: false
+
+# p value significance levels
+pval_levels <- 
+  c(0.001, 0.01, 0.05, 0.1, 1) |> setNames(c("***", "**", "*", "~", "ns"))
+
+corr_matrix |>
+  filter(
+    !is.na(chisq),
+    name.y %in% c("all_eps.permil", "C16:1/C16:0_eps.permil"),
+    !name.x %in% c("all_eps.permil", "C16:1/C16:0_eps.permil")
+  ) |>
+  mutate(
+    name.y = fct_rev(name.y),
+    signif = pearson_pval |> map_chr(~names(pval_levels)[which(.x < pval_levels)[1]]),
+    p_val = stats::pchisq(chisq, chisq_df)
+  ) |>
+  ggplot() +
+  aes(name.x, name.y) +
+  #geom_tile(map = aes(fill = pearson_r)) +
+  geom_tile(color = "black", fill = NA_character_) +
+  #scale_fill_gradientn(colours = c("#6D9EC1", "white", "#E46726")) +
+  #geom_point(map = aes(size = p_val, color = pearson_r > 0), alpha = 0.5) + 
+  geom_point(map = aes(size = log10(pearson_pval), color = pearson_r > 0), alpha = 0.5) + 
+  
+  geom_text(map = aes(label = round(p_val, 2))) +
+  scale_color_manual(values = c("#6D9EC1", "#E46726"), labels = function(x) c("neg. correlated", "pos. correlated")) +
+  #scale_size_continuous(
+  #  range = c(14, 1),
+  #  breaks = c(0.1, 0.5, 0.9),
+  #  limits = c(0, 1)
+  #) +
+  scale_size_continuous(
+    breaks = log10(pval_levels), range = c(14, 1),
+    limits = c(-4.5, 0),
+    labels = function(x) {
+      map_chr(10^x, ~names(pval_levels)[which(.x <= pval_levels)[1]]) |>
+        paste0(" (< ", 10^x, ")")
+    }
+  ) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 16),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), 
+    panel.grid.major = element_blank(),
+    strip.background = element_rect(fill = "gray"),
+    strip.text = element_text(size = 20)
+  ) +
+  facet_grid(select_dataset~.) +
+  labs(
+    x = NULL, y = NULL, color = NULL,
+    size = "significance\n(p-value)"
+  ) +
+  coord_cartesian(expand = FALSE)
+```
+
+## MAYBE SI figure - correlation coefficient figure
 
 ```{r}
 #| label: fig-SI-corr-coefs
 #| fig-width: 14
 #| fig-height: 5.5
 #| warning: false
+#| eval: false
 
 # p value significance levels
 pval_levels <- 
@@ -613,12 +832,30 @@ p_vs_cidh
 #| fig-width: 4
 #| fig-height: 4
 #| warning: false
+
+# regression line
+reg_vs_tidh <-
+  corr_matrix |> 
+  filter(name.x == "% total IDH", name.y == "all_eps.permil", select_dataset == "all data") |>   generate_york_regression_line()
+
+# plot
 p_vs_tidh <- 
   all_data |>
   ggplot() +
   aes(`% total IDH`, all_eps.permil) +
-  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
+  #geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
+  # york regression and error envelope
+  geom_ribbon(
+    data = reg_vs_tidh,
+    map = aes(x = NULL, xmin = yrl_x - yrl_sigma_x, xmax = yrl_x + yrl_sigma_x, y = yrl_y),
+    fill = "gray80"
+  ) + 
+  geom_line(
+    data = reg_vs_tidh,
+    map = aes(x = yrl_x, y = yrl_y), linetype = 1
+  ) +
   # vertical error bars are smaller than sample points
+  # only horizontal error bars
   geom_errorbarh(
     map = aes(xmin = `% total IDH` - `% total IDH sd`,
               xmax = `% total IDH` + `% total IDH sd`,
@@ -628,9 +865,10 @@ p_vs_tidh <-
   geom_point(map = aes(color = dataset), size = 4) +
   theme_figure(grid = FALSE, legend = FALSE) +
   scale_x_reverse(labels = scales::percent) +
+  scale_y_continuous(expand = c(0, 0)) +
   scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
   labs(
-    x = "NADPH from all IDH\n(mitochondrial & cytosolic)", 
+    x = "NADPH from IDH\n(mitochondrial & cytosolic)", 
     y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
   )
 p_vs_tidh 
@@ -710,12 +948,88 @@ plot_grid(
 
 ## SI figure - NLS fit parameter space
 
+$$
+\begin{aligned}
+\epsilon_{lipids/water} &= 
+     \frac{\epsilon_{cell/water} + 1}{ L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} - 1 \\
+\epsilon_{other/water} &= \alpha_{o/l} \cdot (\epsilon_{lipids/water} + 1) - 1
+\end{aligned}
+$$
+
+### example point in parameter space
+
 ```{r}
-#| label: fig-SI-glucose-parameter-space
+#| label: fig-SI-eps_vs_lipid_ab_model
 #| fig-width: 4.5
-#| fig-height: 8
+#| fig-height: 4
 #| warning: false
-fits |>
+p_eps_vs_lipid_ab_model <-
+  fits |>
+  filter(near(alpha_ol, 1.20)) |>
+  select(alpha_ol, term, estimate) |> 
+  pivot_wider(names_from = "term", values_from = "estimate") |>
+  crossing(i = 0:10) |>
+  mutate(
+    all_ab.ug_mg = 0 + i * 200/max(i),
+    eps_lw = !!eq, eps_ow = alpha_ol * (eps_lw + 1000) - 1000
+  ) |>
+  pivot_longer(starts_with("eps"), values_to = "all_eps.permil") |>
+  mutate(
+    name = name |> factor() |>
+      fct_recode(
+        "$\\epsilon_{other}$" = "eps_ow",
+        "$\\epsilon_{cell}$" = "eps_cell",
+        "$\\epsilon_{lipids}$" = "eps_lw"
+      )
+  ) |>
+  ggplot() +
+  aes(x = all_ab.ug_mg/1000, all_eps.permil) +
+  # model & annotations
+  geom_line(map = aes(linetype = name), color = brown, show.legend = FALSE) +
+  geom_text(
+    data = function(df) df |>
+      summarize(
+        all_eps.permil = all_eps.permil[i == 8],
+        all_ab.ug_mg = all_ab.ug_mg[i == 8],
+        .by = "name"),
+    map = aes(label = latex2exp::TeX(as.character(name), output = "character")), 
+    parse = TRUE, vjust = -0.5, hjust = 1, size = 6
+  ) +
+  # data and error bars (no point in y )
+  geom_errorbarh(
+    data = all_data |> filter(dataset == "glucose"),
+    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
+              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
+    height = 0, color = brown
+  ) +
+  geom_point(
+    data = all_data |> filter(dataset == "glucose"),
+    color = brown, size = 4
+  ) + 
+  # scales
+  scale_x_continuous(labels = scales::percent) +
+  scale_linetype_manual(values = c(2, 1, 3)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
+  theme_figure(grid = FALSE) +
+  theme(panel.border = element_rect(color = "red", size = 2)) +
+  labs(
+    x = "weight % lipid\n(mg fatty acids / mg dry biomass)",
+    y = latex2exp::TeX("$\\epsilon_{x/water}$ (\U2030)"),
+    color = NULL
+  ) +
+  coord_cartesian(expand = FALSE)
+p_eps_vs_lipid_ab_model
+```
+
+### parameter space
+
+```{r}
+#| label: fig-SI-eps_vs_lipid_ab_model_params
+#| fig-width: 8
+#| fig-height: 4.5
+#| warning: false
+p_eps_vs_lipid_ab_model_params <-
+  fits |>
   mutate(panel = as_factor(term) |> fct_recode(
     "$\\epsilon_{cell/water}$ (\U2030)" = "eps_cell",
     "L (lipid / other NADPH req.)" = "L"
@@ -723,18 +1037,56 @@ fits |>
   ggplot() +
   aes(alpha_ol, estimate) +
   geom_line() +
+  geom_point(
+    data = function(df) df |> filter(near(alpha_ol, 1.20)),
+    size = 5, color = "red", shape = 22
+  ) +
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
   facet_wrap(
-    ~panel, ncol = 1,
+    ~panel, ncol = 2,
     scales = "free_y", strip.position = "left", 
     labeller = label_latex()) +
-  theme_figure() +
+  theme_figure(grid = FALSE) +
   theme(
     strip.placement = "outside",
-    strip.background = element_blank()
+    strip.background = element_blank(),
+    strip.text = element_text(size = 20)
   ) +
   coord_cartesian(expand = FALSE) +
   labs(y = NULL, x = latex2exp::TeX("$\\alpha_{other/lipid}$"))
+p_eps_vs_lipid_ab_model_params
 ```
+
+### combined
+
+```{r}
+#| label: fig-SI-eps_vs_lipid_ab_model
+#| fig-width: 12
+#| fig-height: 4.5
+#| warning: false
+plot_grid(
+  p_eps_vs_lipid_ab_model_params, 
+  p_eps_vs_lipid_ab_model, 
+  align = "h", nrow = 1, rel_widths = c(2, 1),
+  labels = c("A", "B"), label_size = 20
+)
+```
+
+### note
+
+Side note: using a linear regression to get at the parameters did not work well because the errors are so large from the inverted york regression that we're way off in the weeds compared to the NLS fit.
+
+$$
+\begin{aligned}
+\frac{1}{\epsilon_{lipids/water} + 1} &= \frac{L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}}{\epsilon_{cell/water} + 1} =
+\frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} \cdot ab_{all} + \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} = b\cdot ab_{all} + a \\
+a &= \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} 
+    \rightarrow  \epsilon_{cell/water} = \frac{\alpha_{o/l}}{a} - 1\\
+b &= \frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} = \frac{L \cdot (1 - \alpha_{o/l}) \cdot \alpha_{o/l}}{a} 
+    \rightarrow L = \frac{a\cdot b}{(1 - \alpha_{o/l}) \cdot \alpha_{o/l}} \\
+\rightarrow \epsilon_{lipids/water} &= \frac{1}{b\cdot ab_{all} + a} - 1 
+\end{aligned}
+$$
 
 ## SI figure - unsaturation fractionation
 
