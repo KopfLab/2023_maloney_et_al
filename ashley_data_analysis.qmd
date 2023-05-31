@@ -389,9 +389,7 @@ all_data_w_addons <-
   all_data |> 
   mutate(
     `1/all_ab.ug_mg` = 1/all_ab.ug_mg,
-    `1/all_ab.ug_mg sd` = `1/all_ab.ug_mg` * all_ab_sd.ug_mg/all_ab.ug_mg,
-    `1/(all_eps.permil + 1)` = 1/(all_eps.permil/1000 + 1),
-    `1/(all_eps.permil + 1) sd` = `1/(all_eps.permil + 1)` * all_eps_sd.permil/1000 * 1/(all_eps.permil/1000 + 1)
+    `1/all_ab.ug_mg sd` = `1/all_ab.ug_mg` * all_ab_sd.ug_mg/all_ab.ug_mg
   )
 
 # calculate stats
@@ -434,7 +432,8 @@ stats <- stats_data |>
 stats_table <- 
   stats |>
   select(-data) |>
-  select(dataset = select_dataset, y = name.y, x = name.x, everything()) 
+  select(dataset = select_dataset, y = name.y, x = name.x, everything()) |>
+  arrange(y, x, dataset)
 
 export_to_excel(
   stats = stats_table,
@@ -555,12 +554,270 @@ enzymes |>
 
 # New figures
 
-## SI figure - york regressions figure
+## Summary figure
+
+### eps vs tIDH
 
 ```{r}
-#| label: fig-SI-eps-all-york-regressions
-#| fig-width: 14
-#| fig-height: 6
+#| label: fig-eps-vs-tidh
+#| fig-width: 4
+#| fig-height: 4
+#| warning: false
+
+# regression line
+reg_vs_tidh <-
+  stats |> 
+  filter(name.x == "% total IDH", name.y == "all_eps.permil", select_dataset == "all data") |>   generate_york_regression_line()
+
+# plot
+p_vs_tidh <- 
+  all_data |>
+  ggplot() +
+  aes(`% total IDH`, all_eps.permil) +
+  #geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
+  # york regression and error envelope
+  geom_ribbon(
+    data = reg_vs_tidh,
+    map = aes(x = NULL, xmin = yrl_x - yrl_sigma_x, xmax = yrl_x + yrl_sigma_x, y = yrl_y),
+    fill = "gray80"
+  ) + 
+  geom_line(
+    data = reg_vs_tidh,
+    map = aes(x = yrl_x, y = yrl_y), linetype = 1
+  ) +
+  # vertical error bars are smaller than sample points
+  # only horizontal error bars
+  geom_errorbarh(
+    map = aes(xmin = `% total IDH` - `% total IDH sd`,
+              xmax = `% total IDH` + `% total IDH sd`,
+              color = dataset),
+    height = 0
+  ) +
+  geom_point(map = aes(color = dataset), size = 4) +
+  theme_figure(grid = FALSE, legend = FALSE) +
+  scale_x_reverse(labels = scales::percent) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
+  labs(
+    x = "NADPH from IDH\n(mitochondrial & cytosolic)", 
+    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
+  )
+p_vs_tidh 
+```
+
+### glucose inset
+
+```{r}
+#| label: fig-glucose-fit
+#| fig-width: 4
+#| fig-height: 4.5
+#| warning: false
+p_glucose_fit <- 
+  all_data |>
+  filter(dataset == "glucose") |> 
+  select(dataset, all_eps.permil, all_eps_sd.permil, all_ab.ug_mg, all_ab_sd.ug_mg) |>
+  ggplot() + 
+  aes(all_ab.ug_mg/1000, all_eps.permil) +
+  # data
+  geom_errorbar(
+    map = aes(ymin = all_eps.permil - all_eps_sd.permil,
+              ymax = all_eps.permil + all_eps_sd.permil),
+    width = 0, color = brown
+  ) +
+  geom_errorbarh(
+    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
+              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
+    height = 0, color = brown
+  ) +
+  geom_point(size = 4, color = brown) + 
+  # model
+  geom_line(
+    # could use any fit here, they all fit equally well (by sigma)
+    # picking the one shown in the SI exploration of the parameter space
+    data = function(df) {
+      fits |> filter(near(alpha_ol, 1.2)) |>
+        select(alpha_ol, term, estimate) |>
+        pivot_wider(names_from = term, values_from = estimate) |>
+        crossing(all_ab.ug_mg = range(df$all_ab.ug_mg) |> 
+                   scales::expand_range(0.35)) |>
+        mutate(all_eps.permil = rlang::eval_tidy(eq))
+    },
+    linewidth = 1, color = brown
+  ) +
+  # scales and themes
+  scale_x_continuous(labels = scales::percent, breaks = c(0.06, 0.08, 0.1)) + 
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
+  theme_figure(grid = FALSE, legend = FALSE) +
+  labs(
+    x = "weight % lipid\n(mg lipid / mg dry biomass)",
+    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
+  ) +
+  coord_cartesian(expand = FALSE)
+p_glucose_fit
+```
+
+### combined
+
+```{r}
+#| label: fig-summary-tidh
+#| fig-width: 9
+#| fig-height: 4.5
+#| warning: false
+plot_grid(
+  p_vs_tidh, 
+  p_glucose_fit, 
+  align = "h", nrow = 1
+)
+```
+
+## SI figure - eps vs lipid abundance model
+
+$$
+\begin{aligned}
+\epsilon_{lipids/water} &= 
+     \frac{\epsilon_{cell/water} + 1}{ L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} - 1 \\
+\epsilon_{other/water} &= \alpha_{o/l} \cdot (\epsilon_{lipids/water} + 1) - 1
+\end{aligned}
+$$
+
+### example point in parameter space
+
+```{r}
+#| label: fig-SI-eps_vs_lipid_ab_model_example
+#| fig-width: 4.5
+#| fig-height: 4
+#| warning: false
+p_eps_vs_lipid_ab_model_example <-
+  fits |>
+  filter(near(alpha_ol, 1.20)) |>
+  select(alpha_ol, term, estimate) |> 
+  pivot_wider(names_from = "term", values_from = "estimate") |>
+  crossing(i = 0:10) |>
+  mutate(
+    all_ab.ug_mg = 0 + i * 200/max(i),
+    eps_lw = !!eq, eps_ow = alpha_ol * (eps_lw + 1000) - 1000
+  ) |>
+  pivot_longer(starts_with("eps"), values_to = "all_eps.permil") |>
+  mutate(
+    name = name |> factor() |>
+      fct_recode(
+        "$\\epsilon_{other}$" = "eps_ow",
+        "$\\epsilon_{cell}$" = "eps_cell",
+        "$\\epsilon_{lipids}$" = "eps_lw"
+      )
+  ) |>
+  ggplot() +
+  aes(x = all_ab.ug_mg/1000, all_eps.permil) +
+  # model & annotations
+  geom_line(map = aes(linetype = name), size = 1, color = brown, show.legend = FALSE) +
+  geom_text(
+    data = function(df) df |>
+      summarize(
+        all_eps.permil = all_eps.permil[i == 8],
+        all_ab.ug_mg = all_ab.ug_mg[i == 8],
+        .by = "name"),
+    map = aes(label = latex2exp::TeX(as.character(name), output = "character")), 
+    parse = TRUE, vjust = -0.5, hjust = 1, size = 6
+  ) +
+  # data and error bars (no point in y )
+  geom_errorbarh(
+    data = all_data |> filter(dataset == "glucose"),
+    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
+              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
+    height = 0, color = brown
+  ) +
+  geom_point(
+    data = all_data |> filter(dataset == "glucose"),
+    color = brown, size = 4
+  ) + 
+  # scales
+  scale_x_continuous(labels = scales::percent) +
+  scale_linetype_manual(values = c(2, 1, 3)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
+  theme_figure(grid = FALSE) +
+  theme(panel.border = element_rect(color = "red", size = 2)) +
+  labs(
+    x = "weight % lipid\n(mg FAs / mg dry biomass)",
+    y = latex2exp::TeX("$\\epsilon_{x/water}$ (\U2030)"),
+    color = NULL
+  ) +
+  coord_cartesian(expand = FALSE)
+p_eps_vs_lipid_ab_model_example
+```
+
+### parameter space
+
+```{r}
+#| label: fig-SI-eps_vs_lipid_ab_model_params
+#| fig-width: 8
+#| fig-height: 4.5
+#| warning: false
+p_eps_vs_lipid_ab_model_params <-
+  fits |>
+  mutate(panel = as_factor(term) |> fct_recode(
+    "$\\epsilon_{cell/water}$ (\U2030)" = "eps_cell",
+    "L (lipid / other NADPH req.)" = "L"
+  )) |>
+  ggplot() +
+  aes(alpha_ol, estimate) +
+  geom_line(size = 1) +
+  geom_point(
+    data = function(df) df |> filter(near(alpha_ol, 1.20)),
+    size = 5, color = "red", shape = 22
+  ) +
+  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
+  facet_wrap(
+    ~panel, ncol = 2,
+    scales = "free_y", strip.position = "left", 
+    labeller = label_latex()) +
+  theme_figure(grid = FALSE) +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 20)
+  ) +
+  coord_cartesian(expand = FALSE) +
+  labs(y = NULL, x = latex2exp::TeX("$\\alpha_{other/lipid}$"))
+p_eps_vs_lipid_ab_model_params
+```
+
+### combined
+
+```{r}
+#| label: fig-SI-eps_vs_lipid_ab_model
+#| fig-width: 13
+#| fig-height: 4.5
+#| warning: false
+plot_grid(
+  p_eps_vs_lipid_ab_model_params, 
+  p_eps_vs_lipid_ab_model_example, 
+  align = "h", nrow = 1, rel_widths = c(2, 1),
+  labels = c("A", "B"), label_size = 20
+)
+```
+
+### note
+
+Side note: using a linear regression to get at the parameters did not work well because the errors are so large from the inverted york regression that we're way off in the weeds compared to the NLS fit.
+
+$$
+\begin{aligned}
+\frac{1}{\epsilon_{lipids/water} + 1} &= \frac{L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}}{\epsilon_{cell/water} + 1} =
+\frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} \cdot ab_{all} + \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} = b\cdot ab_{all} + a \\
+a &= \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} 
+    \rightarrow  \epsilon_{cell/water} = \frac{\alpha_{o/l}}{a} - 1\\
+b &= \frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} = \frac{L \cdot (1 - \alpha_{o/l}) \cdot \alpha_{o/l}}{a} 
+    \rightarrow L = \frac{a\cdot b}{(1 - \alpha_{o/l}) \cdot \alpha_{o/l}} \\
+\rightarrow \epsilon_{lipids/water} &= \frac{1}{b\cdot ab_{all} + a} - 1 
+\end{aligned}
+$$
+
+## SI figure - epsilon york regressions 
+
+```{r}
+#| label: fig-SI-eps-york-regressions
+#| fig-width: 13
+#| fig-height: 6.5
 #| warning: false
 
 # p value significance levels - use?
@@ -573,7 +830,7 @@ stats_base_plot <-
   aes(x = value.x, y = value.y) +
   # panel highlight
   geom_rect(
-    data = function(df) df |> filter(pearson_pval < 0.2, york_pval < 0.2),
+    data = function(df) df |> filter(pearson_pval < 0.1, york_pval < 0.2),
     map = aes(x = NULL, y = NULL, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
     color = NA_character_, fill = "yellow", alpha = 0.5
   ) +
@@ -616,15 +873,17 @@ stats_base_plot <-
     vjust = "inward", hjust = "inward"
   ) +
   # scales
+  scale_x_continuous(breaks = scales::pretty_breaks(2)) +
   scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
   facet_grid(select_dataset + name.y ~ name.x, scales = "free", switch = "x") +
   theme_figure(grid = FALSE) +
   theme(
+    legend.position = "bottom", 
     strip.background = element_blank(),
     strip.text.y = element_blank(),
     strip.placement = "outside"
   ) +
-  labs(x = NULL) +
+  labs(x = NULL, color = NULL) +
   coord_cartesian(expand = FALSE)
 
 # make plot for all_eps.permil
@@ -633,32 +892,19 @@ stats_base_plot %+%
     stats,
     !is.na(chisq),
     name.y == "all_eps.permil",
-    !name.x %in% c("all_eps.permil", "1/(all_eps.permil + 1)", "C16:1/C16:0_eps.permil")
+    !name.x %in% c("all_eps.permil", "C16:1/C16:0_eps.permil")
   ) +
   labs(y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)"))
 ```
 
-```{r}
-#| label: fig-SI-1-over-eps-york-regressions
-#| fig-width: 14
-#| fig-height: 6
-#| warning: false
+## SI figure - eps 16:1 / 16:0 york regressions
 
-# make plot for 1/eps
-stats_base_plot %+%
-  filter(
-    stats,
-    !is.na(chisq),
-    name.y == "1/(all_eps.permil + 1)",
-    !name.x %in% c("all_eps.permil", "1/(all_eps.permil + 1)", "C16:1/C16:0_eps.permil")
-  ) +
-  labs(y = latex2exp::TeX("$\\frac{1}{\\epsilon_{fattyacid/water} + 1}$"))
-```
+not entirely sure what to include here and how to make sense of it - this is the unsaturation fractionation
 
 ```{r}
 #| label: fig-SI-eps-16-1-0-york-regressions
-#| fig-width: 14
-#| fig-height: 6
+#| fig-width: 13
+#| fig-height: 6.5
 #| warning: false
 
 # make plot for eps 16:1/16:0
@@ -672,7 +918,7 @@ stats_base_plot %+%
   labs(y = latex2exp::TeX("$\\epsilon_{16{:}1/16{:}0}$ (\U2030)"))
 ```
 
-## MAYBE SI figure - correlation coefficient figure
+## MAYBE DROP? SI figure - correlation coefficient figure
 
 ```{r}
 #| label: fig-SI-york-reg-p-vals
@@ -735,7 +981,7 @@ corr_matrix |>
   coord_cartesian(expand = FALSE)
 ```
 
-## MAYBE SI figure - correlation coefficient figure
+## MAYBE DROP? SI figure - correlation coefficient figure
 
 ```{r}
 #| label: fig-SI-corr-coefs
@@ -797,352 +1043,4 @@ corr_matrix |>
   )
 ```
 
-## Summary figure - eps vs t/cIDH
-
-```{r}
-#| label: fig-eps-vs-cidh
-#| fig-width: 4
-#| fig-height: 4
-#| warning: false
-p_vs_cidh <- 
-  all_data |>
-  ggplot() +
-  aes(`% cyto IDH`, all_eps.permil) +
-  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
-  geom_point(map = aes(color = dataset), size = 4) +
-  # vertical error bars are smaller than sample points
-  geom_errorbarh(
-    map = aes(xmin = `% cyto IDH` - `% cyto IDH sd`,
-              xmax = `% cyto IDH` + `% cyto IDH sd`,
-              color = dataset),
-    height = 0
-  ) +
-  theme_figure(grid = FALSE, legend = FALSE) +
-  scale_x_reverse(labels = scales::percent) +
-  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
-  labs(
-    x = "estimated NADPH from cytosolic IDH", 
-    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
-  )
-p_vs_cidh 
-```
-
-```{r}
-#| label: fig-eps-vs-tidh
-#| fig-width: 4
-#| fig-height: 4
-#| warning: false
-
-# regression line
-reg_vs_tidh <-
-  corr_matrix |> 
-  filter(name.x == "% total IDH", name.y == "all_eps.permil", select_dataset == "all data") |>   generate_york_regression_line()
-
-# plot
-p_vs_tidh <- 
-  all_data |>
-  ggplot() +
-  aes(`% total IDH`, all_eps.permil) +
-  #geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "black") + 
-  # york regression and error envelope
-  geom_ribbon(
-    data = reg_vs_tidh,
-    map = aes(x = NULL, xmin = yrl_x - yrl_sigma_x, xmax = yrl_x + yrl_sigma_x, y = yrl_y),
-    fill = "gray80"
-  ) + 
-  geom_line(
-    data = reg_vs_tidh,
-    map = aes(x = yrl_x, y = yrl_y), linetype = 1
-  ) +
-  # vertical error bars are smaller than sample points
-  # only horizontal error bars
-  geom_errorbarh(
-    map = aes(xmin = `% total IDH` - `% total IDH sd`,
-              xmax = `% total IDH` + `% total IDH sd`,
-              color = dataset),
-    height = 0
-  ) +
-  geom_point(map = aes(color = dataset), size = 4) +
-  theme_figure(grid = FALSE, legend = FALSE) +
-  scale_x_reverse(labels = scales::percent) +
-  scale_y_continuous(expand = c(0, 0)) +
-  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
-  labs(
-    x = "NADPH from IDH\n(mitochondrial & cytosolic)", 
-    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
-  )
-p_vs_tidh 
-```
-
-## Summary figure - glucose inset
-
-```{r}
-#| label: fig-glucose-fit
-#| fig-width: 4
-#| fig-height: 4.5
-#| warning: false
-p_glucose_fit <- 
-  fits |>
-  # could use any fit here, they all fit equally well (by sigma)
-  filter(alpha_ol == 1.3) |>
-  select(alpha_ol, term, estimate) |>
-  pivot_wider(names_from = term, values_from = estimate) |>
-  crossing(
-    all_data |>
-      filter(dataset == "glucose") |> 
-      select(dataset, all_eps.permil, all_eps_sd.permil, all_ab.ug_mg, all_ab_sd.ug_mg)
-  ) |>
-  mutate(
-    all_eps_model.permil = rlang::eval_tidy(eq)
-  ) |>
-  ggplot() + 
-  aes(all_ab.ug_mg/1000, all_eps.permil, color = dataset) +
-  geom_errorbar(
-    map = aes(ymin = all_eps.permil - all_eps_sd.permil,
-              ymax = all_eps.permil + all_eps_sd.permil),
-    width = 0
-  ) +
-  geom_errorbarh(
-    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
-              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
-    height = 0
-  ) +
-  geom_point() + 
-  geom_line(map = aes(y = all_eps_model.permil), linewidth = 1) + 
-  geom_point(size = 4) +
-  scale_color_manual(values = c("glucose" = brown)) +
-  scale_x_continuous(labels = scales::percent, breaks = c(0.06, 0.08, 0.1)) + 
-  theme_figure(grid = FALSE, legend = FALSE) +
-  labs(
-    x = "weight % lipid\n(mg lipid / mg dry biomass)",
-    y = latex2exp::TeX("$\\epsilon_{fattyacid/water}$ (\U2030)")
-  )
-p_glucose_fit
-```
-
-## Summary figure - combined
-
-```{r}
-#| label: fig-summary-cidh
-#| fig-width: 9
-#| fig-height: 4.5
-#| warning: false
-plot_grid(
-  p_vs_cidh, 
-  p_glucose_fit, 
-  align = "h", nrow = 1
-)
-```
-
-```{r}
-#| label: fig-summary-tidh
-#| fig-width: 9
-#| fig-height: 4.5
-#| warning: false
-plot_grid(
-  p_vs_tidh, 
-  p_glucose_fit, 
-  align = "h", nrow = 1
-)
-```
-
-## SI figure - NLS fit parameter space
-
-$$
-\begin{aligned}
-\epsilon_{lipids/water} &= 
-     \frac{\epsilon_{cell/water} + 1}{ L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}} - 1 \\
-\epsilon_{other/water} &= \alpha_{o/l} \cdot (\epsilon_{lipids/water} + 1) - 1
-\end{aligned}
-$$
-
-### example point in parameter space
-
-```{r}
-#| label: fig-SI-eps_vs_lipid_ab_model
-#| fig-width: 4.5
-#| fig-height: 4
-#| warning: false
-p_eps_vs_lipid_ab_model <-
-  fits |>
-  filter(near(alpha_ol, 1.20)) |>
-  select(alpha_ol, term, estimate) |> 
-  pivot_wider(names_from = "term", values_from = "estimate") |>
-  crossing(i = 0:10) |>
-  mutate(
-    all_ab.ug_mg = 0 + i * 200/max(i),
-    eps_lw = !!eq, eps_ow = alpha_ol * (eps_lw + 1000) - 1000
-  ) |>
-  pivot_longer(starts_with("eps"), values_to = "all_eps.permil") |>
-  mutate(
-    name = name |> factor() |>
-      fct_recode(
-        "$\\epsilon_{other}$" = "eps_ow",
-        "$\\epsilon_{cell}$" = "eps_cell",
-        "$\\epsilon_{lipids}$" = "eps_lw"
-      )
-  ) |>
-  ggplot() +
-  aes(x = all_ab.ug_mg/1000, all_eps.permil) +
-  # model & annotations
-  geom_line(map = aes(linetype = name), color = brown, show.legend = FALSE) +
-  geom_text(
-    data = function(df) df |>
-      summarize(
-        all_eps.permil = all_eps.permil[i == 8],
-        all_ab.ug_mg = all_ab.ug_mg[i == 8],
-        .by = "name"),
-    map = aes(label = latex2exp::TeX(as.character(name), output = "character")), 
-    parse = TRUE, vjust = -0.5, hjust = 1, size = 6
-  ) +
-  # data and error bars (no point in y )
-  geom_errorbarh(
-    data = all_data |> filter(dataset == "glucose"),
-    map = aes(xmin = (all_ab.ug_mg - all_ab_sd.ug_mg)/1000,
-              xmax = (all_ab.ug_mg + all_ab_sd.ug_mg)/1000),
-    height = 0, color = brown
-  ) +
-  geom_point(
-    data = all_data |> filter(dataset == "glucose"),
-    color = brown, size = 4
-  ) + 
-  # scales
-  scale_x_continuous(labels = scales::percent) +
-  scale_linetype_manual(values = c(2, 1, 3)) +
-  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
-  theme_figure(grid = FALSE) +
-  theme(panel.border = element_rect(color = "red", size = 2)) +
-  labs(
-    x = "weight % lipid\n(mg fatty acids / mg dry biomass)",
-    y = latex2exp::TeX("$\\epsilon_{x/water}$ (\U2030)"),
-    color = NULL
-  ) +
-  coord_cartesian(expand = FALSE)
-p_eps_vs_lipid_ab_model
-```
-
-### parameter space
-
-```{r}
-#| label: fig-SI-eps_vs_lipid_ab_model_params
-#| fig-width: 8
-#| fig-height: 4.5
-#| warning: false
-p_eps_vs_lipid_ab_model_params <-
-  fits |>
-  mutate(panel = as_factor(term) |> fct_recode(
-    "$\\epsilon_{cell/water}$ (\U2030)" = "eps_cell",
-    "L (lipid / other NADPH req.)" = "L"
-  )) |>
-  ggplot() +
-  aes(alpha_ol, estimate) +
-  geom_line() +
-  geom_point(
-    data = function(df) df |> filter(near(alpha_ol, 1.20)),
-    size = 5, color = "red", shape = 22
-  ) +
-  scale_y_continuous(breaks = scales::pretty_breaks(5)) +
-  facet_wrap(
-    ~panel, ncol = 2,
-    scales = "free_y", strip.position = "left", 
-    labeller = label_latex()) +
-  theme_figure(grid = FALSE) +
-  theme(
-    strip.placement = "outside",
-    strip.background = element_blank(),
-    strip.text = element_text(size = 20)
-  ) +
-  coord_cartesian(expand = FALSE) +
-  labs(y = NULL, x = latex2exp::TeX("$\\alpha_{other/lipid}$"))
-p_eps_vs_lipid_ab_model_params
-```
-
-### combined
-
-```{r}
-#| label: fig-SI-eps_vs_lipid_ab_model
-#| fig-width: 12
-#| fig-height: 4.5
-#| warning: false
-plot_grid(
-  p_eps_vs_lipid_ab_model_params, 
-  p_eps_vs_lipid_ab_model, 
-  align = "h", nrow = 1, rel_widths = c(2, 1),
-  labels = c("A", "B"), label_size = 20
-)
-```
-
-### note
-
-Side note: using a linear regression to get at the parameters did not work well because the errors are so large from the inverted york regression that we're way off in the weeds compared to the NLS fit.
-
-$$
-\begin{aligned}
-\frac{1}{\epsilon_{lipids/water} + 1} &= \frac{L \cdot ab_{all} \cdot (1 - \alpha_{o/l}) + \alpha_{o/l}}{\epsilon_{cell/water} + 1} =
-\frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} \cdot ab_{all} + \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} = b\cdot ab_{all} + a \\
-a &= \frac{\alpha_{o/l}}{\epsilon_{cell/water} + 1} 
-    \rightarrow  \epsilon_{cell/water} = \frac{\alpha_{o/l}}{a} - 1\\
-b &= \frac{L \cdot (1 - \alpha_{o/l})}{\epsilon_{cell/water} + 1} = \frac{L \cdot (1 - \alpha_{o/l}) \cdot \alpha_{o/l}}{a} 
-    \rightarrow L = \frac{a\cdot b}{(1 - \alpha_{o/l}) \cdot \alpha_{o/l}} \\
-\rightarrow \epsilon_{lipids/water} &= \frac{1}{b\cdot ab_{all} + a} - 1 
-\end{aligned}
-$$
-
-## SI figure - unsaturation fractionation
-
-not entirely sure what to include here and how to make sense of it
-
-```{r}
-#| label: fig-SI-unsaturated-fractionation
-#| fig-width: 10
-#| fig-height: 4
-#| warning: false
-all_data |>
-  mutate(
-    # multiply for easier plotting
-    `%unsat value` = `% unsat` * 100,
-    `%unsat sd` = `% unsat sd` * 100,
-    `growth_rate value` = growth_rate.1_d,
-    `eps_all value` = all_eps.permil,
-    `eps_all sd` = all_eps_sd.permil
-  ) |>
-  pivot_longer(
-    cols = c(
-      `growth_rate value`, `eps_all value`, `eps_all sd`, 
-      `%unsat value`, `%unsat sd`),
-    names_to = c("name", ".value"),
-    names_pattern = "([^ .]+) (value|sd)?"
-  ) |> 
-  mutate(
-    panel = name |> as_factor() |>
-      fct_recode(
-        "Growth rate ($d^{-1}$)" = "growth_rate",
-        #"abundance ratio\n(16:1/16:0)" = "r_16_1_0"
-        "Unsaturated FAs (%)" = "%unsat"
-      )
-    ) |>
-  ggplot() +
-  aes(value, `C16:1/C16:0_eps.permil`, color = dataset) +
-  geom_errorbar(
-    map = aes(ymin = `C16:1/C16:0_eps.permil` - `C16:1/C16:0_eps_sd.permil`,
-              ymax = `C16:1/C16:0_eps.permil` + `C16:1/C16:0_eps_sd.permil`),
-    width = 0
-  ) +
-  geom_errorbarh(
-    map = aes(xmin = value - sd, xmax = value + sd),
-    height = 0
-  ) +
-  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) + 
-  geom_point(size = 4) +
-  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
-  facet_wrap(
-    ~panel, nrow = 1,
-    scales = "free_x", strip.position = "bottom", 
-    labeller = label_latex()) +
-  theme_figure(grid = FALSE, legend = FALSE) +
-  theme(
-    strip.placement = "outside",
-    strip.background = element_blank()
-  ) +
-  labs(x = NULL, y = latex2exp::TeX("$\\epsilon_{16{:}1/16{:}0}$ (\U2030)")) 
-```
+## 
