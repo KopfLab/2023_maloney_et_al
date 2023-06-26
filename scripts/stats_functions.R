@@ -117,7 +117,8 @@ york_regression <- function (X, Y, sigma_X, sigma_Y, omega_X = 1/sigma_X^2, omeg
 #' generate a york regression line based on 
 #' @param ds data frame with york regression parameter columns 'a', 'b', 'cov_ab', 'sigma_a', 'sigma_b', 'xmin', 'xmax'
 #' @param expand how far to expand the line beyond the data's xmin/xmax (see [dplyr::expansion]), default is 10%
-generate_york_regression_line <- function(ds, expand = ggplot2::expansion(mult = 0.1), n = 10L) {
+#' @param xmin/xmax define a specific xmin/xmax to model, if set @expand has no effect
+generate_york_regression_line <- function(ds, expand = ggplot2::expansion(mult = 0.1), xmin = NULL, xmax = NULL, n = 10L) {
   
   expand_range <- function(min, max, mult, add, sign) {
     if (sign < 0) min - (max - min) * mult - add
@@ -139,8 +140,8 @@ generate_york_regression_line <- function(ds, expand = ggplot2::expansion(mult =
       yrl_xmax_x = expand_range(xmin, xmax, expand[3], expand[4], +1),
       yrl_xmax_y = expand_range(calc_x_from_y(ymin, a, b), calc_x_from_y(ymax, a, b), expand[3], expand[4], +1),
       # is this always the right choice?
-      yrl_xmin = yrl_xmin_y, # is this always the right choice?
-      yrl_xmax = yrl_xmax_y
+      yrl_xmin = if(!is.null(!!xmin)) !!xmin else yrl_xmin_y, # is this always the right choice?
+      yrl_xmax = if(!is.null(!!xmax)) !!xmax else yrl_xmax_y
       #yrl_xmin = ifelse(yrl_xmin1 > yrl_xmin2, yrl_xmin1, yrl_xmin2),
       #yrl_xmax = ifelse(yrl_xmax_x < yrl_xmax_y, yrl_xmax_x, yrl_xmax_y)
     ) |>
