@@ -607,51 +607,7 @@ fits <-
   unnest(nls_coefs)
 ```
 
-# Data Overview (just to check, not for MS)
-
-## Figure 2
-
-```{r}
-lipids |> 
-  left_join(growth_rates, by = c("dataset", "growth")) |>
-  ggplot() +
-  aes(growth_rate.1_d, eps_mean.permil, color = dataset, shape = fatty_acid) +
-  geom_point(
-    data = function(df) df |> filter(fatty_acid == "all"),
-    size = 4
-  ) +
-  # geom_point(
-  #   data = function(df) df |> filter(fatty_acid != "all"),
-  #   size = 2, alpha = 0.5, show.legend = FALSE
-  # ) +
-  geom_jitter(
-    data = lipids_all |> left_join(growth_rates, by = c("dataset", "growth")),
-    map = aes(y = eps_fa_water.permil),
-    size = 2, alpha = 0.5, show.legend = FALSE
-  ) + 
-  theme_bw() +
-  facet_wrap(~dataset, scales = "free_y")
-```
-
-## Figure 3
-
-```{r}
-enzymes |> 
-  left_join(growth_rates, by = c("dataset", "growth")) |>
-  ggplot() +
-  aes(growth_rate.1_d, rate_mean, color = dataset) +
-  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
-  geom_point(size = 4) +
-  geom_point(
-    data = enzymes_all |>left_join(growth_rates, by = c("dataset", "growth")),
-    map = aes(y = rate),
-    size = 2, alpha = 0.5
-  ) +
-  theme_bw() +
-  facet_wrap(~enzyme)
-```
-
-# New figures
+# Figures
 
 ## Summary figure
 
@@ -1007,7 +963,6 @@ p_corr_coefs <-
 p_corr_coefs
 ```
 
-
 ### york regressions
 
 ```{r}
@@ -1113,7 +1068,6 @@ plot_grid(
 )
 ```
 
-
 ## SI figure - eps 16:1 / 16:0 york regressions
 
 not entirely sure what to include here and how to make sense of it - this is the unsaturation fractionation
@@ -1124,8 +1078,6 @@ $$
 \epsilon_x &= \frac{f_{x:0} \cdot \epsilon_{x:0} + f_{x:1} \cdot \epsilon_{x:1}}{f_{x:0} + f_{x:1}}
 \end{aligned}
 $$
-
-
 
 ```{r}
 #| label: fig-SI-eps-16-1-0-york-regressions
@@ -1143,4 +1095,3 @@ stats_base_plot %+%
   ) +
   labs(y = latex2exp::TeX("$^2\\epsilon_{16{:}1/16{:}0}$ (\U2030)"))
 ```
-
