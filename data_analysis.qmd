@@ -1070,8 +1070,6 @@ plot_grid(
 
 ## SI figure - eps 16:1 / 16:0 york regressions
 
-not entirely sure what to include here and how to make sense of it - this is the unsaturation fractionation
-
 $$
 \begin{aligned}
 \epsilon_{x:1/x:0} &= \frac{\epsilon_{x:1} + 1}{\epsilon_{x:0} + 1} - 1 = \frac{\delta_{x:1} + 1}{\delta_{x:0} + 1} - 1 \\
