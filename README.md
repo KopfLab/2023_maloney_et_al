@@ -13,7 +13,7 @@ In publishing this repository, our hope is that this code is useful to other mem
 1. Download and install R for your operating system.
 2. Download and install RStudio for your operating system.
 3. Download a zip file of this repository and decompress it in a directory of your choosing on your computer.
-4. Navigate to the directory and open `d2o.Rproj` file to start Rstudio and load this project's files.
+4. Navigate to the directory and open `project.Rproj` file to start Rstudio and load this project's files.
 5. Open the `data_analysis.qmd` notebook. 
 6. Ensure that you have all of the required libraries installed by inspecting the `Setup` chunk. If any libraries fail to install, note the name of the library and attempt to manually install its most recent version via CRAN or GitHub.
 7. To generate an HTML report, select `File` --> `Render Document` from the menu.
