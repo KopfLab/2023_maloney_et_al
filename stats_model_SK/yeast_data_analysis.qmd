@@ -22,79 +22,6 @@ editor_options:
   chunk_output_type: console
 ---
 
-```{r}
-#| eval: false
-#| echo: false
-
-# for ashley
-
-# FIXME: delete when done
-
-# get growth rates from S1
-growth_rates <- readxl::read_excel("output/table_S1_all_data.xlsx", sheet = "growth_rates")
-
-# get the enzyme summary from S2
-enzymes_sum <- readxl::read_excel("output/table_S2_data_summary.xlsx", sheet = "enzymes_summary")
-
-# load the stats
-stats <- readxl::read_excel("output/table_S3_stats.xlsx")
-
-# combine
-enzymes_w_growth_rates <- enzymes_sum |>
-  left_join(growth_rates, by = c("dataset", "growth"))
-
-# subset for plotting
-enzymes_w_growth_rates |>
-  filter(enzyme == "all") |>
-  ggplot() + 
-  aes(growth_rate.1_d, rate_mean, color = dataset) +
-  geom_point(size = 4) +
-  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
-  theme_bw()
-
-# or for all
-enzymes_w_growth_rates |>
-  mutate(enzyme = as_factor(enzyme)) |>
-  ggplot() + 
-  aes(growth_rate.1_d, rate_mean, color = dataset) +
-  # york regression
-  geom_line(
-    data = function(df) 
-      stats |> 
-      mutate(
-        dataset = str_extract(dataset, "^\\w+"),
-        enzyme = str_remove(y, "_rate$")
-      ) |>
-      filter(
-        dataset != "all",
-        x == "growth_rate.1_d", 
-        enzyme %in% unique(df$enzyme)) |>
-      generate_york_regression_line(xmin = 0, xmax = 3),
-    map = aes(x = yrl_x, y = yrl_y), linetype = 1
-  ) +
-  # summary data points with error bars
-  geom_point(size = 4) +
-  geom_errorbar(
-    aes(ymin = rate_mean - rate_sd, ymax = rate_mean + rate_sd),
-    width = 0
-  ) +
-  geom_errorbarh(
-    aes(xmin = growth_rate.1_d - growth_rate_sd.1_d,
-        xmax = growth_rate.1_d + growth_rate_sd.1_d),
-    height = 0
-  ) +
-  scale_color_manual(values = c("glycerol" = blue, "glucose" = brown)) +
-  theme_bw() +
-  facet_wrap(~enzyme, ncol = 2, scales = "free_y") +
-  coord_cartesian(xlim = c(0, 3), expand = FALSE)
-
-  # geom_point(
-  #   data = enzymes_all |>left_join(growth_rates, by = c("dataset", "growth")),
-  #   map = aes(y = rate),
-  #   size = 2, alpha = 0.5
-  # ) +
-```
-
 # Setup
 
 ```{r}
@@ -102,7 +29,6 @@ enzymes_w_growth_rates |>
 #| message: false
 
 # load packages
-library(rlang)
 library(tidyverse)
 library(readxl)
 library(cowplot)
