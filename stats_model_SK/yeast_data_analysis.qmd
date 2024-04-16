@@ -1,5 +1,6 @@
 ---
 title: "Plots and data anlysis for Maloney et al. 2024"
+author: "Sebastian Kopf (sebastian.kopf@colorado.edu)"
 date: "`r format(Sys.Date(), '%d %b %Y')`"
 format: 
   html:
